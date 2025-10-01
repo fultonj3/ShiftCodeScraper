@@ -162,6 +162,41 @@ def extract_codes(html: str) -> List[str]:
     return sorted(candidates)
 
 
+def extract_expired_codes(html: str) -> Set[str]:
+    """Extract codes listed under the 'All Expired SHiFT Codes' section.
+
+    Attempts to locate the expired section via its anchor id or a table header
+    text. Returns an empty set if the section cannot be found.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Prefer the explicit header anchor id
+    expired_anchor = soup.find(id="All_Expired_SHiFT_Codes_in_Borderlands_4")
+    table = None
+    if expired_anchor:
+        h = expired_anchor.find_parent(["h2", "h3"]) or expired_anchor
+        table = h.find_next("table")
+    else:
+        # Fallback: a table with a header that starts with 'All Expired SHiFT Codes'
+        for th in soup.find_all("th"):
+            text = (th.get_text(strip=True) or "").lower()
+            if text.startswith("all expired shift codes"):
+                table = th.find_parent("table")
+                if table:
+                    break
+
+    if not table:
+        return set()
+
+    expired: Set[str] = set()
+    for text in table.stripped_strings:
+        for token in re.split(r"[^A-Za-z0-9-]+", text):
+            token = token.strip().upper()
+            if token and CODE_REGEX.match(token):
+                expired.add(token)
+    return expired
+
+
 def try_extract_by_class(html: str, tag: str, class_tokens: Sequence[str]) -> tuple[List[str], bool]:
     """Attempt to extract codes from elements matching tag + all class tokens.
 
@@ -231,6 +266,16 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Disable class-based scan and only use robust page-wide scan.",
     )
+    parser.add_argument(
+        "--pause",
+        action="store_true",
+        help="Pause for Enter before exiting (useful when double-clicked).",
+    )
+    parser.add_argument(
+        "--include-expired",
+        action="store_true",
+        help="Include codes listed in the 'Expired' section (default: exclude)",
+    )
     return parser.parse_args(argv)
 
 
@@ -278,6 +323,17 @@ def main(argv: Sequence[str]) -> int:
 
     logging.info("Found %d codes on page%s", len(scraped), " (fallback scan)" if not used_selector else "")
 
+    # Exclude explicitly expired codes (by page section) unless requested
+    if not args.include_expired:
+        expired = extract_expired_codes(html)
+        if expired:
+            before = len(scraped)
+            scraped = [c for c in scraped if c not in expired]
+            removed = before - len(scraped)
+            logging.info("Excluded %d expired code(s) via page section", removed)
+        else:
+            logging.debug("No expired section or no expired codes found.")
+
     new_codes = [c for c in scraped if c not in existing]
     logging.info("New codes to add: %d", len(new_codes))
 
@@ -292,4 +348,12 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    exit_code = main(sys.argv[1:])
+    # Keep console window open when double-clicked (no args), or when --pause is provided.
+    try:
+        if ("--pause" in sys.argv) or (len(sys.argv) == 1 and sys.stdin and sys.stdin.isatty()):
+            sys.stdout.flush()
+            input("Press Enter to exit...")
+    except Exception:
+        pass
+    sys.exit(exit_code)
