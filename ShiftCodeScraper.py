@@ -321,6 +321,67 @@ def extract_code_expirations(html: str) -> dict[str, str]:
     return mapping
 
 
+def _chunked(seq: Sequence[str], size: int) -> Iterable[Sequence[str]]:
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+
+
+def post_discord_webhook(
+    webhook_url: str,
+    codes: Sequence[str],
+    expirations: dict[str, str] | None = None,
+    batch_size: int = 10,
+) -> None:
+    """Post newly found codes to a Discord webhook.
+
+    To ensure all codes appear in a single message block per batch across
+    Discord clients, this composes one embed per message and lists each code
+    as a bullet line in the embed description: `CODE` — expiration.
+    The description has a 4096 character limit; we chunk safely.
+    """
+    exp_map = {k.upper(): v for k, v in (expirations or {}).items()}
+
+    if not codes:
+        return
+
+    # Reasonable line budget per message so we stay under 4096 chars
+    # Fallback to original batch_size if provided explicitly
+    max_chars = 3900
+    session = requests_session()
+
+    # Build lines once
+    lines = [f"• `{code}` — {exp_map.get(code.upper(), '') or 'Unknown'}" for code in codes]
+
+    current: list[str] = []
+    current_len = 0
+    def flush():
+        nonlocal current, current_len
+        if not current:
+            return
+        description = "\n".join(current)
+        embed = {
+            "title": "New Borderlands 4 SHiFT Codes",
+            "url": DEFAULT_URL,
+            "color": 0xBF1313,
+            "description": description,
+        }
+        payload = {"embeds": [embed], "allowed_mentions": {"parse": []}}
+        resp = session.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code not in (200, 204):
+            raise RuntimeError(f"Webhook HTTP {resp.status_code}: {resp.text[:200]}")
+        current = []
+        current_len = 0
+
+    for line in lines:
+        # If adding this line would exceed our budget, flush first
+        if current and (current_len + 1 + len(line) > max_chars):
+            flush()
+        current.append(line)
+        current_len += (1 + len(line)) if current_len else len(line)
+
+    flush()
+
+
 def try_extract_by_class(html: str, tag: str, class_tokens: Sequence[str]) -> tuple[List[str], bool]:
     """Attempt to extract codes from elements matching tag + all class tokens.
 
@@ -411,6 +472,19 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
         action="store_true",
         help="Include codes listed in the 'Expired' section (default: exclude)",
     )
+    # Optional Discord webhook for notifications
+    parser.add_argument(
+        "--discord-webhook",
+        dest="discord_webhook",
+        default=None,
+        help="Discord webhook URL to post newly found codes (optional)",
+    )
+    parser.add_argument(
+        "--webhook-batch-size",
+        type=int,
+        default=10,
+        help="Max embeds per Discord message (default: 10; Discord limit)",
+    )
     return parser.parse_args(argv)
 
 
@@ -478,6 +552,18 @@ def main(argv: Sequence[str]) -> int:
     wrote = write_new_codes(
         csv_path, new_codes, today, dry_run=args.dry_run, expirations=exp_map
     )
+    # Optionally post to Discord webhook if configured and not a dry run
+    if (not args.dry_run) and args.discord_webhook and new_codes:
+        try:
+            post_discord_webhook(
+                webhook_url=args.discord_webhook,
+                codes=new_codes,
+                expirations=exp_map,
+                batch_size=args.webhook_batch_size,
+            )
+            logging.info("Posted %d new code(s) to Discord webhook.", len(new_codes))
+        except Exception as e:
+            logging.warning("Discord webhook failed: %s", e)
     if args.dry_run:
         logging.info("Dry run complete. No changes written.")
     else:
