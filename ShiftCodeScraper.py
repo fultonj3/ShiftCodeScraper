@@ -6,7 +6,7 @@ Purpose
 - Validates code format via regex and avoids duplicates.
 
 CSV columns
-- Code, Date Added (YYYY-MM-DD), Redeemed (Yes/No)
+- Code, Date Added (YYYY-MM-DD), Expiration, Redeemed (Yes/No)
 
 Notes
 - Optionally targets a specific tag/class when provided; warns if not found
@@ -74,19 +74,46 @@ def requests_session() -> requests.Session:
 
 
 def ensure_csv_header(path: Path) -> None:
-    """Create CSV with header if it doesn't exist, or add a header if missing."""
-    if not path.exists():
-        with path.open("x", newline="", encoding="utf-8") as f:
+    """Ensure CSV exists with a header including Expiration.
+
+    - If the file does not exist or is empty, create with header:
+      Code, Date Added, Expiration, Redeemed
+    - If an older header (without Expiration) is detected as the first line,
+      upgrade the header in-place while preserving existing rows.
+    """
+    desired_header = ["Code", "Date Added", "Expiration", "Redeemed"]
+
+    if not path.exists() or path.stat().st_size == 0:
+        mode = "x" if not path.exists() else "w"
+        with path.open(mode, newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow(["Code", "Date Added", "Redeemed"])
+            writer.writerow(desired_header)
         return
 
-    # If file exists but first row isn't a header, leave as-is (backwards compatible)
-    # We only add a header to an empty existing file.
-    if path.stat().st_size == 0:
-        with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["Code", "Date Added", "Redeemed"])
+    # Attempt header upgrade if we detect the older 3-column header
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if lines:
+            first = lines[0].strip().lower()
+            if first == ",".join(["code", "date added", "redeemed"]):
+                # Rewrite with new header, insert blank Expiration for existing rows if any
+                upgraded = [",".join(desired_header)]
+                for row in csv.reader(lines[1:]):
+                    if not row:
+                        continue
+                    # Insert empty Expiration between Date Added and Redeemed
+                    if len(row) >= 3:
+                        upgraded.append(
+                            ",".join([row[0], row[1], "", row[2]])
+                        )
+                    else:
+                        upgraded.append(
+                            ",".join([row[0] if row else "", "", "", "No"])
+                        )
+                path.write_text("\n".join(upgraded) + "\n", encoding="utf-8")
+    except Exception:
+        # Be conservative: if anything odd, leave file as-is
+        pass
 
 
 def read_existing_codes(path: Path) -> Set[str]:
@@ -197,6 +224,103 @@ def extract_expired_codes(html: str) -> Set[str]:
     return expired
 
 
+def _collect_code_tokens_from_node_text(text: str) -> List[str]:
+    tokens: List[str] = []
+    for token in re.split(r"[^A-Za-z0-9-]+", text or ""):
+        token = token.strip().upper()
+        if token and CODE_REGEX.match(token):
+            tokens.append(token)
+    return tokens
+
+
+def extract_code_expirations(html: str) -> dict[str, str]:
+    """Extract a mapping of code -> expiration text from the Active codes table.
+
+    Strategy: find the table following the "All Active Borderlands 4 SHiFT Codes"
+    header. Rows tend to come in pairs: the first contains the code, the next
+    contains reward and expiration. We pair them and pull the expiration text.
+
+    Returns a dict mapping code (uppercased) to a human-readable expiration
+    string (e.g., "No expiration", "Unknown Expiration ...", or the contents of
+    the rendered event text such as "October 12, 2025 ...").
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Locate the Active section table
+    active_anchor = soup.find(id="All_Active_Borderlands_4_SHiFT_Codes")
+    table = None
+    if active_anchor:
+        h = active_anchor.find_parent(["h2", "h3"]) or active_anchor
+        table = h.find_next("table")
+    if not table:
+        # Fallback: scan for the first table that contains a Limited-Time header
+        for th in soup.find_all("th"):
+            text = (th.get_text(strip=True) or "").lower()
+            if "limited-time" in text or "permanent" in text:
+                table = th.find_parent("table")
+                if table:
+                    break
+    if not table:
+        return {}
+
+    trs = table.find_all("tr", recursive=True)
+    mapping: dict[str, str] = {}
+    i = 0
+    while i < len(trs):
+        tr = trs[i]
+        # Find code(s) in this row
+        row_codes: list[str] = []
+        # Search text
+        row_codes.extend(_collect_code_tokens_from_node_text(tr.get_text(" ", strip=True)))
+        # Search attributes in inputs/labels as a bonus
+        for tag in tr.find_all(True):
+            for val in tag.attrs.values():
+                if isinstance(val, str):
+                    row_codes.extend(_collect_code_tokens_from_node_text(val))
+                elif isinstance(val, Sequence):
+                    for v in val:
+                        if isinstance(v, str):
+                            row_codes.extend(_collect_code_tokens_from_node_text(v))
+        # Deduplicate
+        row_codes = sorted({c.upper() for c in row_codes})
+
+        if row_codes:
+            # Default expiration text
+            expiration = ""
+            # Look ahead one row for the details
+            if i + 1 < len(trs):
+                nxt = trs[i + 1]
+                # Prefer the second cell if present
+                cells = nxt.find_all("td")
+                exp_container = cells[1] if len(cells) >= 2 else nxt
+                # If there is a div with class simple-event, take its text; else whole cell text
+                evt = exp_container.find(class_="simple-event")
+                if evt and evt.get_text(strip=True):
+                    expiration = evt.get_text(" ", strip=True)
+                else:
+                    t = exp_container.get_text(" ", strip=True)
+                    # Normalize common patterns
+                    if not t:
+                        expiration = ""
+                    elif "no expiration" in t.lower():
+                        expiration = "No expiration"
+                    elif "unknown expiration" in t.lower():
+                        # Keep the whole message so the user sees the last-checked note
+                        expiration = t
+                    else:
+                        expiration = t
+            # Record for all codes found in this row
+            for code in row_codes:
+                mapping[code] = expiration
+            # Skip the following row as it's paired details
+            i += 2
+            continue
+
+        i += 1
+
+    return mapping
+
+
 def try_extract_by_class(html: str, tag: str, class_tokens: Sequence[str]) -> tuple[List[str], bool]:
     """Attempt to extract codes from elements matching tag + all class tokens.
 
@@ -227,22 +351,33 @@ def try_extract_by_class(html: str, tag: str, class_tokens: Sequence[str]) -> tu
     return (sorted(candidates), True)
 
 
-def write_new_codes(path: Path, codes: Iterable[str], date_str: str, dry_run: bool = False) -> int:
-    """Append new codes to CSV with date and default Redeemed flag.
+def write_new_codes(
+    path: Path,
+    codes: Iterable[str],
+    date_str: str,
+    dry_run: bool = False,
+    expirations: dict[str, str] | None = None,
+) -> int:
+    """Append new codes to CSV with date, expiration (if known), and default Redeemed flag.
 
     Returns the number of codes written.
     """
+    exp_map = {k.upper(): v for k, v in (expirations or {}).items()}
+
     if dry_run:
         for code in codes:
-            logging.info("Would add code: %s", code)
+            logging.info(
+                "Would add code: %s (expires: %s)", code, exp_map.get(code.upper(), "")
+            )
         return len(list(codes))
 
     wrote = 0
     with path.open("a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         for code in codes:
-            writer.writerow([code, date_str, "No"])
-            logging.info("Added code: %s", code)
+            expiration = exp_map.get(code.upper(), "")
+            writer.writerow([code, date_str, expiration, "No"])
+            logging.info("Added code: %s%s", code, f" (expires: {expiration})" if expiration else "")
             wrote += 1
     return wrote
 
@@ -337,8 +472,12 @@ def main(argv: Sequence[str]) -> int:
     new_codes = [c for c in scraped if c not in existing]
     logging.info("New codes to add: %d", len(new_codes))
 
+    # Build expiration mapping from the Active table for context in CSV
+    exp_map = extract_code_expirations(html)
     today = dt.datetime.now().strftime("%Y-%m-%d")
-    wrote = write_new_codes(csv_path, new_codes, today, dry_run=args.dry_run)
+    wrote = write_new_codes(
+        csv_path, new_codes, today, dry_run=args.dry_run, expirations=exp_map
+    )
     if args.dry_run:
         logging.info("Dry run complete. No changes written.")
     else:
