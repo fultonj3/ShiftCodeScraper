@@ -62,6 +62,9 @@ def create_driver(
         user_data_dir: Optional path to a browser profile (to keep session/cookies).
         binary_path: Optional explicit browser binary path.
     """
+    # If not provided, honor CHROME_PROFILE_DIR/BROWSER_PROFILE_DIR from the environment
+    if not user_data_dir:
+        user_data_dir = os.getenv("CHROME_PROFILE_DIR") or os.getenv("BROWSER_PROFILE_DIR")
     if browser == "edge":
         options = EdgeOptions()
         # Use Chromium Edge
@@ -72,6 +75,7 @@ def create_driver(
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1440,900")
+        options.add_argument("--remote-debugging-port=0")
         if user_data_dir:
             options.add_argument(f"--user-data-dir={user_data_dir}")
         if binary_path:
@@ -90,6 +94,7 @@ def create_driver(
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--window-size=1440,900")
+    options.add_argument("--remote-debugging-port=0")
     if user_data_dir:
         options.add_argument(f"--user-data-dir={user_data_dir}")
     if binary_path:
