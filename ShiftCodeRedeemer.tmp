@@ -19,8 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import List, Dict
-import os
+from typing import List
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -38,14 +37,11 @@ from webdriver_manager.microsoft import EdgeChromiumDriverManager
 # Configurable constants
 DEFAULT_URL = "https://shift.gearboxsoftware.com/rewards"
 
-# Placeholder creds and platform (can be overridden via CLI/env)
+# Placeholder creds and platform (wire these up later if desired)
+USERNAME = "redacted"
+PASSWORD = "redacted"
 # Options: 1 - Steam, 2 - Epic Games, 3 - Xbox, 4 - PlayStation
-USERNAME = os.getenv("SHIFT_USERNAME", "")
-PASSWORD = os.getenv("SHIFT_PASSWORD", "")
-try:
-    PLATFORM = int(os.getenv("SHIFT_PLATFORM", "1"))
-except ValueError:
-    PLATFORM = 1
+PLATFORM = 1
 
 
 def create_driver(
@@ -100,12 +96,7 @@ def create_driver(
     return driver
 
 
-def login(
-    driver,
-    wait: WebDriverWait,
-    username: str | None = None,
-    password: str | None = None,
-) -> None:
+def login(driver, wait: WebDriverWait) -> None:
 
     print("[i] Logging in...")
 
@@ -119,8 +110,8 @@ def login(
         EC.presence_of_element_located((By.XPATH, "//input[@id='user_password']"))
     )
 
-    user_field.send_keys(username or USERNAME)
-    pass_field.send_keys(password or PASSWORD)
+    user_field.send_keys(USERNAME)
+    pass_field.send_keys(PASSWORD)
     sign_in_btn.click()
 
     print("[i] Login success!")
@@ -134,9 +125,7 @@ def go_to_rewards_page(driver, wait: WebDriverWait, url: str) -> None:
     wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
 
 
-def redeem_code(
-    driver, wait: WebDriverWait, code: str, platform: int | None = None
-) -> str:
+def redeem_code(driver, wait: WebDriverWait, code: str) -> bool:
     """Redeem a single SHiFT code. Returns True on apparent success.
 
     TODO: Replace placeholders with real XPath interactions once you inspect the page.
@@ -173,6 +162,8 @@ def redeem_code(
         By.XPATH, "//div[@id='shift_code_instructions']"
     )
     error_check_two = driver.find_element(By.XPATH, "//div[@id='shift_code_error']")
+    print(error_check_one.get_attribute("style"))
+    print(error_check_two.get_attribute("style"))
     if (
         error_check_one.get_attribute("style") != "display: none;"
         or error_check_two.get_attribute("style") != "display: none;"
@@ -185,7 +176,7 @@ def redeem_code(
             (By.XPATH, "//form[@class='new_archway_code_redemption']")
         )
     )
-    match (platform or PLATFORM):
+    match PLATFORM:
         case 1:
             driver.find_element(By.XPATH, "//input[@value='Redeem for Steam']").click()
         case 2:
@@ -201,45 +192,6 @@ def redeem_code(
         return "Successfully Redeemed"
 
     return "Already Redeemed"
-
-
-def redeem_codes_session(
-    codes: List[str],
-    *,
-    browser: str = "chrome",
-    headless: bool = False,
-    url: str = DEFAULT_URL,
-    user_data_dir: str | None = None,
-    binary_path: str | None = None,
-    wait_timeout: int = 20,
-    username: str | None = None,
-    password: str | None = None,
-    platform: int | None = None,
-) -> Dict[str, str]:
-    """Redeem multiple codes in one browser session. Returns code->status."""
-    driver = create_driver(
-        browser=browser,
-        headless=headless,
-        user_data_dir=user_data_dir,
-        binary_path=binary_path,
-    )
-    results: Dict[str, str] = {}
-    try:
-        wait = WebDriverWait(driver, wait_timeout)
-        go_to_rewards_page(driver, wait, url)
-        login(driver, wait, username=username, password=password)
-        for code in codes:
-            try:
-                status = redeem_code(driver, wait, code, platform=platform)
-            except Exception as e:
-                status = f"Error: {e}"
-            results[code] = status
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-    return results
 
 
 def parse_args(argv: List[str]) -> argparse.Namespace:
@@ -274,18 +226,6 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         type=int,
         default=20,
         help="Explicit wait timeout in seconds (default: 20)",
-    )
-    parser.add_argument(
-        "--username", help="SHiFT account username (or env SHIFT_USERNAME)"
-    )
-    parser.add_argument(
-        "--password", help="SHiFT account password (or env SHIFT_PASSWORD)"
-    )
-    parser.add_argument(
-        "--platform",
-        type=int,
-        choices=[1, 2, 3, 4],
-        help="Platform: 1 Steam, 2 Epic, 3 Xbox, 4 PlayStation (or env SHIFT_PLATFORM)",
     )
     return parser.parse_args(argv)
 
