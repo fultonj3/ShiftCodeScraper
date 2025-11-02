@@ -83,7 +83,7 @@ def create_driver(
 
     # Default to Chrome
     options = ChromeOptions()
-    options.add_experimental_option("detach", True)
+    # options.add_experimental_option("detach", True)
     if headless:
         options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
@@ -323,7 +323,7 @@ def main(argv: List[str]) -> int:
 
     finally:
         print("[i] Closing browser")
-        # driver.quit()
+        driver.quit()
 
 
 if __name__ == "__main__":
