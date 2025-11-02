@@ -1,24 +1,10 @@
 """
-Multi-user SHiFT code runner
+Multi-user SHiFT runner.
 
-Reads users from a .env file, scrapes for new codes via ShiftCodeScraper,
-then redeems those codes for each user using ShiftCodeRedeemer in a single
-login session per user. Updates the CSV with per-user redeemed status.
-
-.env format example:
-  USERS=alice,bob
-  SHIFT_alice_USERNAME=alice@example.com
-  SHIFT_alice_PASSWORD=supersecret
-  SHIFT_alice_PLATFORM=steam      # or 1/2/3/4
-  SHIFT_alice_BROWSER=chrome      # optional, chrome|edge
-  SHIFT_alice_HEADLESS=false      # optional, true|false
-  SHIFT_bob_USERNAME=...
-  SHIFT_bob_PASSWORD=...
-  SHIFT_bob_PLATFORM=3            # xbox
-
-Optional globals:
-  CSV_PATH=shift_codes.csv
-  SCRAPER_URL=https://...
+- Loads users from .env
+- Scrapes for new codes
+- Redeems new codes per user in one browser session
+- Updates CSV with per-user redeemed status
 """
 
 from __future__ import annotations
