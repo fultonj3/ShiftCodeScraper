@@ -382,6 +382,72 @@ def post_discord_webhook(
     flush()
 
 
+def post_discord_webhook_with_summary(
+    webhook_url: str,
+    codes: Sequence[str],
+    expirations: dict[str, str] | None = None,
+    batch_size: int = 10,
+    user_success_counts: dict[str, int] | None = None,
+    total_attempted: int | None = None,
+) -> None:
+    """Post new codes plus an optional redemption summary to a Discord webhook.
+
+    - Lists each new code as: `CODE` — expiration
+    - Adds a "Redemption Summary" field with per-user counts when provided.
+    """
+    exp_map = {k.upper(): v for k, v in (expirations or {}).items()}
+
+    if not codes:
+        return
+
+    max_chars = 3900
+    session = requests_session()
+
+    lines = [f"• `{code}` — {exp_map.get(code.upper(), '') or 'Unknown'}" for code in codes]
+
+    current: list[str] = []
+    current_len = 0
+
+    def flush():
+        nonlocal current, current_len
+        if not current:
+            return
+        description = "\n".join(current)
+        embed = {
+            "title": "New Borderlands 4 SHiFT Codes",
+            "url": DEFAULT_URL,
+            "color": 0xBF1313,
+            "description": description,
+        }
+        if user_success_counts:
+            total = total_attempted if total_attempted is not None else len(codes)
+            summary_lines = [
+                f"{user}: {count}/{total} successfully redeemed"
+                for user, count in user_success_counts.items()
+            ]
+            embed.setdefault("fields", []).append(
+                {
+                    "name": "Redemption Summary",
+                    "value": "\n".join(summary_lines) or "(no results)",
+                    "inline": False,
+                }
+            )
+        payload = {"embeds": [embed], "allowed_mentions": {"parse": []}}
+        resp = session.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code not in (200, 204):
+            raise RuntimeError(f"Webhook HTTP {resp.status_code}: {resp.text[:200]}")
+        current = []
+        current_len = 0
+
+    for line in lines:
+        if current and (current_len + 1 + len(line) > max_chars):
+            flush()
+        current.append(line)
+        current_len += (1 + len(line)) if current_len else len(line)
+
+    flush()
+
+
 def try_extract_by_class(html: str, tag: str, class_tokens: Sequence[str]) -> tuple[List[str], bool]:
     """Attempt to extract codes from elements matching tag + all class tokens.
 

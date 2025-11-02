@@ -142,8 +142,8 @@ def set_user_status(csv_path: Path, code: str, user: str, yes: bool) -> None:
         writer.writerows([header] + rows[1:])
 
 
-def collect_new_codes(csv_path: Path, url: str) -> List[str]:
-    """Scrape and append any new codes to CSV; return the new codes list."""
+def collect_new_codes(csv_path: Path, url: str) -> tuple[List[str], dict[str, str]]:
+    """Scrape and append any new codes; return (new_codes, expirations_map)."""
     scraper.ensure_csv_header(csv_path)
     existing = scraper.read_existing_codes(csv_path)
     html = scraper.fetch_html(url)
@@ -158,7 +158,7 @@ def collect_new_codes(csv_path: Path, url: str) -> List[str]:
     import datetime as dt
     today = dt.datetime.now().strftime("%Y-%m-%d")
     scraper.write_new_codes(csv_path, new_codes, today, expirations=exp_map)
-    return new_codes
+    return new_codes, exp_map
 
 
 def main() -> int:
@@ -170,12 +170,15 @@ def main() -> int:
     users = load_users_from_env()
 
     logging.info("Found %d user(s)", len(users))
-    new_codes = collect_new_codes(csv_path, url)
+    new_codes, exp_map = collect_new_codes(csv_path, url)
     if not new_codes:
         logging.info("No new codes found. Nothing to redeem.")
         return 0
 
     ensure_user_columns(csv_path, users)
+
+    # Track per-user successful redemptions for webhook summary
+    user_success: Dict[str, int] = {}
 
     for u in users:
         logging.info("Redeeming %d code(s) for %s", len(new_codes), u.name)
@@ -187,10 +190,11 @@ def main() -> int:
             password=u.password,
             platform=u.platform,
         )
+        success_count = 0
         for code, status in results.items():
+            is_success = isinstance(status, str) and ("successfully redeemed" in status.lower())
             ok = isinstance(status, str) and (
-                "successfully redeemed" in status.lower()
-                or "already redeemed" in status.lower()
+                "successfully redeemed" in status.lower() or "already redeemed" in status.lower()
             )
             if not ok and str(status).lower().startswith("error:"):
                 logging.error("%s: %s -> %s", u.name, code, status)
@@ -199,6 +203,24 @@ def main() -> int:
             else:
                 logging.info("%s: %s -> %s", u.name, code, status)
             set_user_status(csv_path, code, u.name, ok)
+            if is_success:
+                success_count += 1
+        user_success[u.name] = success_count
+
+    # Optional Discord webhook summary including per-user success counts
+    webhook_url = os.getenv("DISCORD_WEBHOOK", "").strip()
+    if webhook_url and new_codes:
+        try:
+            scraper.post_discord_webhook_with_summary(
+                webhook_url=webhook_url,
+                codes=new_codes,
+                expirations=exp_map,
+                user_success_counts=user_success,
+                total_attempted=len(new_codes),
+            )
+            logging.info("Posted new codes + redemption summary to Discord webhook.")
+        except Exception as e:
+            logging.warning("Discord webhook failed: %s", e)
 
     logging.info("Done.")
     return 0
