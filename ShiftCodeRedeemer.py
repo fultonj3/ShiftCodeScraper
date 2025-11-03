@@ -20,6 +20,8 @@ from __future__ import annotations
 import argparse
 import sys
 from typing import List, Dict
+from pathlib import Path
+import datetime as dt
 import os
 
 from selenium import webdriver
@@ -46,6 +48,84 @@ try:
     PLATFORM = int(os.getenv("SHIFT_PLATFORM", "1"))
 except ValueError:
     PLATFORM = 1
+
+# Debug artifacts directory (screenshots, DOM, logs)
+DEBUG_DIR = os.getenv("DEBUG_ARTIFACTS_DIR") or os.getenv("DEBUG_DIR")
+
+def _ensure_dir(path: Path) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+def _safe_filename(s: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_", ".") else "_" for c in (s or ""))[:120]
+
+def _debug_dump(driver, label: str) -> None:
+    if not DEBUG_DIR:
+        return
+    base = Path(DEBUG_DIR)
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    sub = base / f"{ts}_{_safe_filename(label)}"
+    _ensure_dir(sub)
+    # Screenshot
+    try:
+        driver.save_screenshot(str(sub / "screenshot.png"))
+    except Exception:
+        pass
+    # DOM dump
+    try:
+        (sub / "dom.html").write_text(driver.page_source or "", encoding="utf-8", errors="ignore")
+    except Exception:
+        pass
+    # Frames summary
+    try:
+        frames = driver.find_elements(By.TAG_NAME, "iframe")
+        lines = [f"iframes: {len(frames)}"]
+        for i, fr in enumerate(frames):
+            lines.append(
+                f"[{i}] name={fr.get_attribute('name')!r} id={fr.get_attribute('id')!r} src={fr.get_attribute('src')!r}"
+            )
+        (sub / "frames.txt").write_text("\n".join(lines), encoding="utf-8")
+    except Exception:
+        pass
+    # Browser console logs (best-effort)
+    try:
+        logs = driver.get_log("browser")
+        if logs:
+            (sub / "console.log").write_text(
+                "\n".join(f"{e.get('level','')}: {e.get('message','')}" for e in logs),
+                encoding="utf-8",
+            )
+    except Exception:
+        pass
+
+def _find_in_all_frames(driver, by, value, wait: WebDriverWait, timeout: int):
+    """Search default content, then each top-level iframe. Returns (element, frame_index or None)."""
+    from selenium.common.exceptions import TimeoutException
+    import time
+    deadline = time.time() + max(1, timeout)
+    driver.switch_to.default_content()
+    try:
+        el = WebDriverWait(driver, min(5, timeout)).until(EC.presence_of_element_located((by, value)))
+        return el, None
+    except Exception:
+        pass
+    frames = driver.find_elements(By.TAG_NAME, "iframe")
+    for idx, fr in enumerate(frames):
+        if time.time() > deadline:
+            break
+        try:
+            driver.switch_to.default_content()
+            driver.switch_to.frame(fr)
+            el = WebDriverWait(driver, max(1, int(deadline - time.time()))).until(
+                EC.presence_of_element_located((by, value))
+            )
+            return el, idx
+        except Exception:
+            continue
+    driver.switch_to.default_content()
+    raise TimeoutException(f"Element not found by {by}={value} in default content or iframes")
 
 
 def create_driver(
@@ -117,22 +197,28 @@ def login(
 ) -> None:
 
     print("[i] Logging in...")
-
-    sign_in_btn = wait.until(
-        EC.element_to_be_clickable((By.XPATH, "//input[@value='SIGN IN']"))
-    )
-    user_field = wait.until(
-        EC.presence_of_element_located((By.XPATH, "//input[@id='user_email']"))
-    )
-    pass_field = wait.until(
-        EC.presence_of_element_located((By.XPATH, "//input[@id='user_password']"))
-    )
-
-    user_field.send_keys(username or USERNAME)
-    pass_field.send_keys(password or PASSWORD)
-    sign_in_btn.click()
-
-    print("[i] Login success!")
+    _debug_dump(driver, "before_login")
+    try:
+        sign_in_btn, frame_idx = _find_in_all_frames(
+            driver, By.XPATH, "//input[@value='SIGN IN']", wait, timeout=max(10, int(getattr(wait, "_timeout", 10)))
+        )
+        if frame_idx is not None:
+            print(f"[i] Found SIGN IN inside iframe index {frame_idx}")
+        user_field = wait.until(
+            EC.presence_of_element_located((By.XPATH, "//input[@id='user_email']"))
+        )
+        pass_field = wait.until(
+            EC.presence_of_element_located((By.XPATH, "//input[@id='user_password']"))
+        )
+        user_field.clear(); user_field.send_keys(username or USERNAME)
+        pass_field.clear(); pass_field.send_keys(password or PASSWORD)
+        _debug_dump(driver, "after_credentials_fill")
+        sign_in_btn.click()
+        _debug_dump(driver, "after_sign_in_click")
+        print("[i] Login submitted")
+    except Exception:
+        _debug_dump(driver, "login_error")
+        raise
 
 
 def go_to_rewards_page(driver, wait: WebDriverWait, url: str) -> None:
@@ -141,6 +227,7 @@ def go_to_rewards_page(driver, wait: WebDriverWait, url: str) -> None:
     # Wait for a known element on the rewards page (adjust as needed later)
     # This is safe to keep generic for now.
     wait.until(lambda d: d.execute_script("return document.readyState") == "complete")
+    _debug_dump(driver, "after_page_load")
 
 
 def redeem_code(
