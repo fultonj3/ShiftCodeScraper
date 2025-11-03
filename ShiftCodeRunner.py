@@ -199,8 +199,7 @@ def main() -> int:
     logging.info("Found %d user(s)", len(users))
     new_codes, exp_map = collect_new_codes(csv_path, url)
     if not new_codes:
-        logging.info("No new codes found. Nothing to redeem.")
-        return 0
+        logging.info("No new codes found; checking pending codes for each user.")
 
     ensure_user_columns(csv_path, users)
 
