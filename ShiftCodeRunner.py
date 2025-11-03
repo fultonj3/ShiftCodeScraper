@@ -142,6 +142,33 @@ def set_user_status(csv_path: Path, code: str, user: str, yes: bool) -> None:
         writer.writerows([header] + rows[1:])
 
 
+def read_pending_codes_for_user(csv_path: Path, user: str) -> List[str]:
+    """Return all codes whose per-user column is not marked 'Yes'.
+
+    Ensures existing rows without the per-user column are treated as pending.
+    """
+    import csv as _csv
+    if not csv_path.exists():
+        return []
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        rows = [r for r in _csv.reader(f)]
+    if not rows:
+        return []
+    header = rows[0]
+    code_idx = 0
+    col = f"Redeemed:{user}"
+    col_idx = header.index(col) if col in header else None
+    pending: List[str] = []
+    for row in rows[1:]:
+        if not row or not (row[code_idx] or "").strip():
+            continue
+        # If column missing, treat as pending; else require value to be exactly 'Yes'
+        val = (row[col_idx] if (col_idx is not None and col_idx < len(row)) else "").strip().lower()
+        if val != "yes":
+            pending.append((row[code_idx] or "").strip())
+    return pending
+
+
 def collect_new_codes(csv_path: Path, url: str) -> tuple[List[str], dict[str, str]]:
     """Scrape and append any new codes; return (new_codes, expirations_map)."""
     scraper.ensure_csv_header(csv_path)
@@ -181,9 +208,15 @@ def main() -> int:
     user_success: Dict[str, int] = {}
 
     for u in users:
-        logging.info("Redeeming %d code(s) for %s", len(new_codes), u.name)
+        # Build attempt list from CSV per-user column so retries happen automatically
+        pending_codes = read_pending_codes_for_user(csv_path, u.name)
+        if not pending_codes:
+            logging.info("No pending codes to redeem for %s", u.name)
+            user_success[u.name] = 0
+            continue
+        logging.info("Redeeming %d code(s) for %s", len(pending_codes), u.name)
         results: Dict[str, str] = redeemer.redeem_codes_session(
-            new_codes,
+            pending_codes,
             browser=u.browser,
             headless=u.headless,
             username=u.username,
