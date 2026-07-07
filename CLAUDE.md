@@ -79,6 +79,8 @@ DISCORD_WEBHOOK=<url>
 DEBUG_ARTIFACTS_DIR=./debug
 ```
 
+**This is a public repo.** Never put real credentials, tokens, webhook URLs, or other secrets/private info in this file or any committed file — `.env` (gitignored) is the only place for that.
+
 ## CSV Schema
 
 Auto-created at `shift_codes.csv` (path overridable via `CSV_PATH`):
